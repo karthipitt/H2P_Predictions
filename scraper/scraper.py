@@ -1,41 +1,78 @@
 #!/usr/bin/env python
-import os
+import os,sys
 import json
 import pandas as pd
 import sqlite3 as lite
+from datetime import datetime
 from subprocess import Popen, PIPE
 from collections import Counter
 
-sql_file = os.environ['JOB_SQL_PATH']
+sql_file = os.environ['H2P_DATA_PATH']
 
-def add_refdata(energy,**args):
-    '''
-    Writes an entry to the sql table
-    '''
-    cov = '{}x{}'.format(*args['cov'])
-    data = [args['host'],args['fac'],args['ads'],args['site'],cov,
-            energy,args['root']]
+def add_data(qdinfo, ts):
     con = lite.connect(sql_file)
     cur = con.cursor()
-    try:
-        cur.execute("INSERT into refdata VALUES(?,?,?,?,?,?,?)",((data)))
-    except lite.Error, e:
-        print "Error %s:" % e.args[0]
-        sys.exit(1)
+    for q,g in qdinfo.iteritems():
+        clus = q.split()[0]
+        p = q.split()[1]
+        for gr in g.groups:
+            try:
+                data = [ts, clus, p, gr[0], gr[1], len(g.groups[gr])]
+                cur.execute("INSERT into qdjobinfo VALUES(?,?,?,?,?,?)",((data)))
+            except lite.Error, e:
+                print "Error %s:" % e.args[0]
+                sys.exit(1)
     con.commit()
     con.close()
 
-def job_data():
+def clus_data(ts):
+    '''
+    sinfo -M mpi -O nodeaiot -p opa
+    sinfo -M smp -O nodeaiot -p smp
+    sinfo -M smp -O nodeaiot -p high-mem
+    sinfo -M smp -O cpusstate -p smp
+    sinfo -M smp -O cpusstate -p high-mem
+    ''' 
+    con = lite.connect(sql_file)
+    cur = con.cursor()
+    clus_dict = {'mpi':['opa'], 'smp':['smp','high-mem']}
+    qdinfo = {}
+    for clus, partition in clus_dict.iteritems():
+        for p in partition:
+            nodeinfo = Popen(['sinfo', '-M', clus, '-p', p, '-O', 'nodeaiot'], stdout=PIPE, stderr=PIPE)
+            out, error = nodeinfo.communicate()
+            nodestat = out.strip().split('\n')[-1].split('/')
+            nodestat = list(map(lambda x: int(x), nodestat))
+
+            cpuinfo = Popen(['sinfo', '-M', clus, '-p', p, '-O', 'cpusstate'], stdout=PIPE, stderr=PIPE)
+            out, error = cpuinfo.communicate()
+            cpustat = out.strip().split('\n')[-1].split('/')
+            cpustat = list(map(lambda x: int(x), cpustat))
+            state, reason, g = job_data(clus,p,ts)
+            qdinfo['{} {}'.format(clus,p)] = g
+            data = [ts, clus, p, state['R'], state['PD']]
+            data = data + nodestat + cpustat
+            holders = ','.join('?' * 13)
+            try:
+                cur.execute("INSERT into clusdata VALUES({})".format(holders),((data)))
+            except lite.Error, e:
+                print "Error %s:" % e.args[0]
+                sys.exit(1)
+    con.commit()
+    con.close()
+    add_data(qdinfo, ts) 
+
+def job_data(clus, p, ts):
     '''
     Module to scrap job/user data from squeue/sacct output
     '''
-    jobq = Popen(['squeue', '-M', 'smp'], stdout=PIPE, stderr=PIPE)
+    jobq = Popen(['squeue', '-M', clus, '-p', p], stdout=PIPE, stderr=PIPE)
     out, error = jobq.communicate()
     
     all_jobs = out.strip().split('\n')
     all_states, all_reasons, users = [], [], []
     
-    for jline in all_jobs[-2:]:
+    for jline in all_jobs[2:]:
         jsplit = jline.split()
         jid = jsplit[0]
         state = jsplit[4]
@@ -49,24 +86,9 @@ def job_data():
          'reason':pd.Series(all_reasons)}
     df = pd.DataFrame(d)
     g = df.groupby(['user','reason'])
-    for gr in g.groups:
-        print gr, len(g.groups[gr])
+    return Counter(all_states), Counter(all_reasons), g 
 
-    jobq = Popen(['sacct', '-j', jid], stdout=PIPE, stderr=PIPE)
-    out, error = jobq.communicate()
-    print out
-        
-    print Counter(all_states) , Counter(all_reasons)  
-
-def usage_status():
-    '''
-    Module to scrap node availability status from sinfo 
-    '''
-    sinfo = Popen(['sinfo', '-M', 'smp'], stdout=PIPE, stderr=PIPE)
-    out, error = sinfo.communicate()
-    
-    all_parts = out.strip().split('\n')
-    for parts in all_parts:
-        pss = parts.split()
-        if pss[0].startswith('smp'):
-            print pss
+if __name__ == '__main__':
+    ts = datetime.now()
+    clus_data(ts)
+    #job_data('smp','smp')
