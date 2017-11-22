@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/python
+
 import os,sys
 import json
 import pandas as pd
@@ -6,33 +7,17 @@ import sqlite3 as lite
 from datetime import datetime
 from subprocess import Popen, PIPE
 from collections import Counter
+from apscheduler.schedulers.blocking import BlockingScheduler
 
 sql_file = os.environ['H2P_DATA_PATH']
 
-def add_data(qdinfo, ts):
-    con = lite.connect(sql_file)
-    cur = con.cursor()
-    for q,g in qdinfo.iteritems():
-        clus = q.split()[0]
-        p = q.split()[1]
-        for gr in g.groups:
-            try:
-                data = [ts, clus, p, gr[0], gr[1], len(g.groups[gr])]
-                cur.execute("INSERT into qdjobinfo VALUES(?,?,?,?,?,?)",((data)))
-            except lite.Error, e:
-                print "Error %s:" % e.args[0]
-                sys.exit(1)
-    con.commit()
-    con.close()
-
-def clus_data(ts):
+def clus_data():
     '''
-    sinfo -M mpi -O nodeaiot -p opa
-    sinfo -M smp -O nodeaiot -p smp
-    sinfo -M smp -O nodeaiot -p high-mem
-    sinfo -M smp -O cpusstate -p smp
-    sinfo -M smp -O cpusstate -p high-mem
+    Get usage info from sinfo for all clusters and partitions
+    Write data to clusdata table
     ''' 
+
+    ts = datetime.now()
     con = lite.connect(sql_file)
     cur = con.cursor()
     clus_dict = {'mpi':['opa'], 'smp':['smp','high-mem']}
@@ -64,8 +49,10 @@ def clus_data(ts):
 
 def job_data(clus, p, ts):
     '''
-    Module to scrap job/user data from squeue/sacct output
+    Get 'PD' job info for all clusters and partitions
+    Groups PD jobs by user/reason for PD
     '''
+
     jobq = Popen(['squeue', '-M', clus, '-p', p], stdout=PIPE, stderr=PIPE)
     out, error = jobq.communicate()
     
@@ -88,7 +75,33 @@ def job_data(clus, p, ts):
     g = df.groupby(['user','reason'])
     return Counter(all_states), Counter(all_reasons), g 
 
+def add_data(qdinfo, ts):
+    '''
+    Writes data to qdjobinfo table
+    '''
+
+    con = lite.connect(sql_file)
+    cur = con.cursor()
+    for q,g in qdinfo.iteritems():
+        clus = q.split()[0]
+        p = q.split()[1]
+        for gr in g.groups:
+            try:
+                data = [ts, clus, p, gr[0], gr[1], len(g.groups[gr])]
+                cur.execute("INSERT into qdjobinfo VALUES(?,?,?,?,?,?)",((data)))
+            except lite.Error, e:
+                print "Error %s:" % e.args[0]
+                sys.exit(1)
+    con.commit()
+    con.close()
+
 if __name__ == '__main__':
-    ts = datetime.now()
-    clus_data(ts)
-    #job_data('smp','smp')
+    scheduler = BlockingScheduler()
+    scheduler.add_job(clus_data, 'interval', seconds=600)
+#    print('Press Ctrl+{0} to exit'.format('Break' if os.name == 'nt' else 'C'))
+    
+    try:
+        scheduler.start()
+    except (KeyboardInterrupt, SystemExit):
+        pass
+
